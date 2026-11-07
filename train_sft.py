@@ -1,3 +1,4 @@
+
 import os
 import torch
 import torch.nn.functional as F
@@ -45,8 +46,10 @@ print("Training examples:", len(train_data))
 print("Validation examples:", len(val_data))
 
 
-
 BATCH_SIZE = 16
+
+# Google Drive checkpoint directory
+CHECKPOINT_DIR = "/content/drive/MyDrive/rlhf-summarizer/checkpoints/sft"
 
 
 # Create training DataLoader
@@ -75,12 +78,14 @@ val_loader = DataLoader(
 
 print("Training batches:", len(train_loader))
 print("Validation batches:", len(val_loader))
+
 batch = next(iter(train_loader))
 
 print("\nBatch shapes:")
 print("Input IDs:", batch["input_ids"].shape)
 print("Attention mask:", batch["attention_mask"].shape)
 print("Prompt lengths:", batch["prompt_lens"].shape)
+
 
 def sft_loss(model, batch, device):
     """
@@ -110,8 +115,11 @@ def sft_loss(model, batch, device):
 
     return loss
 
+
 learning_rate = 5e-5
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+
 @torch.no_grad()
 def evaluate_loss(model, val_loader, device):
 
@@ -129,6 +137,7 @@ def evaluate_loss(model, val_loader, device):
 
     model.train()
     return avg_loss
+
 
 def train_sft(model, train_loader, val_loader, optimizer, device):
 
@@ -165,7 +174,21 @@ def train_sft(model, train_loader, val_loader, optimizer, device):
                 f"Validation Loss: {val_loss:.4f}"
             )
 
+            # Save checkpoint every 250 steps
+            checkpoint_path = os.path.join(
+                CHECKPOINT_DIR,
+                f"step_{step}"
+            )
+
+            os.makedirs(checkpoint_path, exist_ok=True)
+
+            model.save_pretrained(checkpoint_path)
+            tokenizer.save_pretrained(checkpoint_path)
+
+            print("Checkpoint saved:", checkpoint_path)
+
             total_loss = 0.0
+
 
 train_sft(
     model=model,
@@ -175,8 +198,9 @@ train_sft(
     device=device
 )
 
+
 # Save the fine-tuned model
-save_path = "checkpoints/sft"
+save_path = "/content/drive/MyDrive/rlhf-summarizer/checkpoints/sft/final"
 
 os.makedirs(save_path, exist_ok=True)
 
