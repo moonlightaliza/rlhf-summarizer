@@ -96,25 +96,20 @@ def sft_loss(model, batch, device):
     prompt_lens = batch["prompt_lens"].to(device)
 
     # Forward pass
-    outputs = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-    )
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
 
-    # Get logits
-    logits = outputs.logits
+        logits = outputs.logits
 
-    # Compute token log probabilities
-    log_probs = token_logprobs(logits, input_ids)
+        log_probs = token_logprobs(logits, input_ids)
 
-    # Create summary mask
-    summary_mask = make_summary_mask(attention_mask, prompt_lens)
+        summary_mask = make_summary_mask(attention_mask, prompt_lens)
 
-    loss = -log_probs*summary_mask.float()
-    loss = loss.sum() / summary_mask.sum().clamp(min=1.0)
-
-    return loss
-
+        loss = -log_probs * summary_mask.float()
+        loss = loss.sum() / summary_mask.sum().clamp(min=1.0)
 
 learning_rate = 5e-5
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
