@@ -174,3 +174,13 @@ train_sft(
     optimizer=optimizer,
     device=device
 )
+
+# Save the fine-tuned model
+save_path = "checkpoints/sft"
+
+os.makedirs(save_path, exist_ok=True)
+
+model.save_pretrained(save_path)
+tokenizer.save_pretrained(save_path)
+
+print("SFT model saved successfully!")
