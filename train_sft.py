@@ -45,8 +45,8 @@ print("Training examples:", len(train_data))
 print("Validation examples:", len(val_data))
 
 
-# Training configuration
-BATCH_SIZE = 1
+
+BATCH_SIZE = 16
 
 
 # Create training DataLoader
@@ -94,7 +94,6 @@ def sft_loss(model, batch, device):
     outputs = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
-        labels=input_ids
     )
 
     # Get logits
@@ -111,9 +110,67 @@ def sft_loss(model, batch, device):
 
     return loss
 
-# Test SFT loss
-batch = next(iter(train_loader))
+learning_rate = 5e-5
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+@torch.no_grad()
+def evaluate_loss(model, val_loader, device):
 
-loss = sft_loss(model, batch, device)
+    model.eval()
 
-print("\nSFT Loss:", loss.item())
+    total_loss = 0.0
+
+    for batch in val_loader:
+
+        loss = sft_loss(model, batch, device)
+
+        total_loss += loss.item()
+
+    avg_loss = total_loss / len(val_loader)
+
+    model.train()
+    return avg_loss
+
+def train_sft(model, train_loader, val_loader, optimizer, device):
+
+    model.train()
+    total_loss = 0.0
+
+    for step, batch in enumerate(train_loader, start=1):
+        optimizer.zero_grad()
+        loss = sft_loss(model, batch, device)
+        loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0
+        )
+
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        if step % 250 == 0:
+
+            avg_train_loss = total_loss / 250
+
+            val_loss = evaluate_loss(
+                model,
+                val_loader,
+                device
+            )
+
+            print(
+                f"Step {step} | "
+                f"Train Loss: {avg_train_loss:.4f} | "
+                f"Validation Loss: {val_loss:.4f}"
+            )
+
+            total_loss = 0.0
+
+train_sft(
+    model=model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    optimizer=optimizer,
+    device=device
+)
