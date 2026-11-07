@@ -110,6 +110,7 @@ def sft_loss(model, batch, device):
 
         loss = -log_probs * summary_mask.float()
         loss = loss.sum() / summary_mask.sum().clamp(min=1.0)
+        return loss
 
 learning_rate = 5e-5
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
