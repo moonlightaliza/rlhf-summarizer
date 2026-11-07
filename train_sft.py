@@ -46,7 +46,8 @@ print("Training examples:", len(train_data))
 print("Validation examples:", len(val_data))
 
 
-BATCH_SIZE = 16
+BATCH_SIZE = 1
+ACCUMULATION_STEPS = 16
 
 # Google Drive checkpoint directory
 CHECKPOINT_DIR = "/content/drive/MyDrive/rlhf-summarizer/checkpoints/sft"
@@ -140,50 +141,47 @@ def train_sft(model, train_loader, val_loader, optimizer, device):
     model.train()
     total_loss = 0.0
 
+    optimizer.zero_grad()
+
     for step, batch in enumerate(train_loader, start=1):
-        optimizer.zero_grad()
+
         loss = sft_loss(model, batch, device)
-        loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            max_norm=1.0
-        )
-
-        optimizer.step()
+        (loss / ACCUMULATION_STEPS).backward()
 
         total_loss += loss.item()
 
-        if step % 250 == 0:
+        if step % ACCUMULATION_STEPS == 0:
 
-            avg_train_loss = total_loss / 250
-
-            val_loss = evaluate_loss(
-                model,
-                val_loader,
-                device
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0
             )
 
-            print(
-                f"Step {step} | "
-                f"Train Loss: {avg_train_loss:.4f} | "
-                f"Validation Loss: {val_loss:.4f}"
-            )
+            optimizer.step()
+            optimizer.zero_grad()
 
-            # Save checkpoint every 250 steps
-            checkpoint_path = os.path.join(
-                CHECKPOINT_DIR,
-                f"step_{step}"
-            )
+            optimizer_step = step // ACCUMULATION_STEPS
 
-            os.makedirs(checkpoint_path, exist_ok=True)
+            if optimizer_step % 250 == 0:
 
-            model.save_pretrained(checkpoint_path)
-            tokenizer.save_pretrained(checkpoint_path)
+                avg_train_loss = total_loss / (
+                    250 * ACCUMULATION_STEPS
+                )
 
-            print("Checkpoint saved:", checkpoint_path)
+                val_loss = evaluate_loss(
+                    model, val_loader, device
+                )
 
-            total_loss = 0.0
+                print(
+                    f"Step {optimizer_step} | "
+                    f"Train Loss: {avg_train_loss:.4f} | "
+                    f"Validation Loss: {val_loss:.4f}"
+                )
+
+                total_loss = 0.0
+
+    print("SFT training completed!")
 
 
 train_sft(
