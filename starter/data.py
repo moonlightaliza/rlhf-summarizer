@@ -1,6 +1,6 @@
 import random
 from datasets import load_dataset
-from config import *
+from starter.config import *
 
 
 TLDR = "TL;DR:"

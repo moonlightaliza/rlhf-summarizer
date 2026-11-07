@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from config import MODEL_NAME
+from starter.config import MODEL_NAME
 
 
 def load_tokenizer(name=MODEL_NAME):
