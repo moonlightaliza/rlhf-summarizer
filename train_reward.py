@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
 
@@ -49,3 +50,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 sft_path = "/content/drive/MyDrive/rlhf-summarizer/checkpoints/sft/final"
 
 reward_model = RewardModel(sft_path).to(device)
+
+#Define the loss function
+def loss_func(chosen_rewards, rejected_rewards):
+    difference = chosen_rewards - rejected_rewards
+    log_probability = F.logsigmoid(difference)
+    loss = -log_probability
+    return loss.mean()
