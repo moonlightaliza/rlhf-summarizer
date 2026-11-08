@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -110,6 +111,39 @@ for step, batch in enumerate(train_loader):
         )
 
 print("Reward model training completed!")
+
+reward_model.eval()
+correct = 0
+total = 0
+with torch.no_grad():
+    for batch in val_loader:
+        chosen_ids = batch["chosen_ids"].to(device)
+        chosen_mask = batch["chosen_mask"].to(device)
+        rejected_ids = batch["rejected_ids"].to(device)
+        rejected_mask = batch["rejected_mask"].to(device)
+        chosen_rewards = reward_model(chosen_ids, chosen_mask)
+        rejected_rewards = reward_model(rejected_ids, rejected_mask)
+        correct += (chosen_rewards > rejected_rewards).sum().item()
+        total += chosen_rewards.size(0)
+
+accuracy = correct / total
+
+print(f"Validation Pairwise Accuracy: {accuracy:.4f}")
+print(f"Validation Accuracy: {accuracy * 100:.2f}%")
+save_path = "/content/drive/MyDrive/rlhf-summarizer/checkpoints/reward"
+
+os.makedirs(save_path, exist_ok=True)
+
+torch.save(
+    reward_model.state_dict(),
+    os.path.join(save_path, "reward_model.pt")
+)
+
+print("Reward model saved successfully!")
+
+
+
+
 
 
 
