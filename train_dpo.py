@@ -44,8 +44,8 @@ def main():
     train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate)
     val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate)
 
-    policy = load_causal_lm(SFT_PATH, device)    # trainable
-    ref = load_causal_lm(SFT_PATH, device)       # frozen copy of SFT
+    policy = load_causal_lm(SFT_PATH, device).float()
+    ref = load_causal_lm(SFT_PATH, device).float()
     ref.eval()
     for p in ref.parameters():
         p.requires_grad = False
