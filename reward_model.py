@@ -22,4 +22,6 @@ class RewardModel(nn.Module):
         batch_idx = torch.arange(hidden.size(0), device=hidden.device)
         last_hidden = hidden[batch_idx, last_idx]    # (B, H)
 
+        last_hidden = last_hidden.to(self.reward_head.weight.dtype)
+
         return self.reward_head(last_hidden).squeeze(-1)   # (B,)
