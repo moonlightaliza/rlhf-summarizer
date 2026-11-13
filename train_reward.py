@@ -29,7 +29,7 @@ if not os.path.isdir(sft_path):
 
 
 
-reward_model = RewardModel(sft_path).to(device)
+reward_model = RewardModel(sft_path).to(device).float()
 
 print("Reward model initialized successfully!")
 
