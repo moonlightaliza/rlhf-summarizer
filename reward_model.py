@@ -1,27 +1,52 @@
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
 
 class RewardModel(nn.Module):
-    """SFT backbone (no LM head) + a linear layer that outputs one number."""
 
     def __init__(self, sft_path):
         super().__init__()
-        sft_model = AutoModelForCausalLM.from_pretrained(sft_path)
-        self.backbone = sft_model.model              # transformer body only
-        self.reward_head = nn.Linear(sft_model.config.hidden_size, 1)
+
+        sft_model = AutoModelForCausalLM.from_pretrained(
+            sft_path,
+            torch_dtype=torch.float16
+        )
+
+        self.backbone = sft_model.model
+        hidden_size = sft_model.config.hidden_size
+
+        # Reward head remains float32
+        self.reward_head = nn.Linear(hidden_size, 1)
+
+        del sft_model
 
     def forward(self, input_ids, attention_mask):
-        hidden = self.backbone(
-            input_ids=input_ids, attention_mask=attention_mask
-        ).last_hidden_state                          # (B, L, H)
 
-        # Last REAL token of each sequence (works for right-padded input)
-        last_idx = attention_mask.sum(dim=1) - 1
-        batch_idx = torch.arange(hidden.size(0), device=hidden.device)
-        last_hidden = hidden[batch_idx, last_idx]    # (B, H)
+        outputs = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False
+        )
 
-        last_hidden = last_hidden.to(self.reward_head.weight.dtype)
+        hidden_states = outputs.last_hidden_state
 
-        return self.reward_head(last_hidden).squeeze(-1)   # (B,)
+        # Last real token (right padding)
+        last_indices = attention_mask.sum(dim=1) - 1
+
+        batch_indices = torch.arange(
+            hidden_states.size(0),
+            device=hidden_states.device
+        )
+
+        last_hidden = hidden_states[
+            batch_indices, last_indices
+        ]
+
+        # Match reward head precision
+        last_hidden = last_hidden.to(
+            self.reward_head.weight.dtype
+        )
+
+        return self.reward_head(last_hidden).squeeze(-1)
