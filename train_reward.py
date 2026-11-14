@@ -1,185 +1,160 @@
-
 import os
+import json
 import torch
 import torch.nn.functional as F
-
+from functools import partial
 from torch.utils.data import DataLoader
 
+from starter.config import SEED
 from starter.models import load_tokenizer
 from starter.data import load_preference_splits
 from starter.batching import collate_pref
-
 from reward_model import RewardModel
 
+# ---------------- settings (from the assignment) ----------------
+LR = 1e-5
+BATCH_SIZE = 8           # pairs per optimizer step
+MICRO_BATCH = 2          # pairs per forward pass; 4 of these make one batch of 8
+PRINT_EVERY = 50         # log training loss / accuracy
+EVAL_EVERY = 250         # validate + save checkpoint
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
+# ---------------- paths (change these if you run elsewhere) ----------------
 ROOT = "/kaggle/working/rlhf-summarizer"
-
-sft_path = "/kaggle/input/datasets/mobeenrukhsar/sft-checkpoints/final"
-
-save_path = os.path.join(ROOT, "checkpoints", "reward")
-os.makedirs(save_path, exist_ok=True)
-
-BATCH_SIZE = 2
-LEARNING_RATE = 1e-5
-
-print("Device:", device)
-print("SFT path:", sft_path)
-print("Reward save path:", save_path)
-
-if not os.path.isdir(sft_path):
-    raise FileNotFoundError(f"SFT checkpoint not found: {sft_path}")
-
-reward_model = RewardModel(sft_path).to(device)
-
-print("Backbone dtype:", next(reward_model.backbone.parameters()).dtype)
-print("Reward head dtype:", reward_model.reward_head.weight.dtype)
-
-def loss_func(chosen_rewards, rejected_rewards):
-    difference = chosen_rewards - rejected_rewards
-    return -F.logsigmoid(difference).mean()
+SFT_PATH = "/kaggle/input/datasets/mobeenrukhsar/sft-checkpoints/final"
+SAVE_DIR = f"{ROOT}/checkpoints/reward"
+CKPT_PATH = f"{SAVE_DIR}/checkpoint_latest.pt"     # one file, overwritten each time
+FINAL_PATH = f"{SAVE_DIR}/reward_model.pt"         # final model (what PPO loads)
+LOG_PATH = f"{ROOT}/results/reward_log.jsonl"
 
 
-tokenizer = load_tokenizer()
+def train_step(model, optimizer, batch, device):
+    """One optimizer step on a batch of 8 pairs, done as several micro-batches."""
+    B = batch["prompt_lens"].size(0)
+    optimizer.zero_grad(set_to_none=True)
+    total_loss, n_correct = 0.0, 0
 
-train_data, val_data = load_preference_splits(tokenizer)
+    for start in range(0, B, MICRO_BATCH):
+        sub = {k: v[start:start + MICRO_BATCH].to(device) for k, v in batch.items()}
+        chosen = model(sub["chosen_ids"], sub["chosen_mask"])
+        rejected = model(sub["rejected_ids"], sub["rejected_mask"])
+        diff = chosen - rejected
 
-print("Training pairs:", len(train_data))
-print("Validation pairs:", len(val_data))
+        # Bradley-Terry loss: -log sigma(r_w - r_l), divided by the FULL batch size
+        loss = -F.logsigmoid(diff).sum() / B
+        loss.backward()                              # gradients add up across micro-batches
 
-train_loader = DataLoader(
-    train_data,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    collate_fn=lambda batch: collate_pref(
-        batch, tokenizer.pad_token_id
-    )
-)
+        total_loss += loss.item()
+        n_correct += (diff > 0).sum().item()
 
-val_loader = DataLoader(
-    val_data,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    collate_fn=lambda batch: collate_pref(
-        batch, tokenizer.pad_token_id
-    )
-)
-
-optimizer = torch.optim.AdamW(
-    reward_model.parameters(),
-    lr=LEARNING_RATE
-)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+    return total_loss, n_correct                     # loss = mean over the full batch
 
 
-def evaluate():
-    reward_model.eval()
-
-    total_loss = 0.0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for batch in val_loader:
-            chosen_ids = batch["chosen_ids"].to(device)
-            chosen_mask = batch["chosen_mask"].to(device)
-
-            rejected_ids = batch["rejected_ids"].to(device)
-            rejected_mask = batch["rejected_mask"].to(device)
-
-            chosen_rewards = reward_model(chosen_ids, chosen_mask)
-            rejected_rewards = reward_model(rejected_ids, rejected_mask)
-
-            loss = loss_func(chosen_rewards, rejected_rewards)
-
-            total_loss += loss.item() * chosen_ids.size(0)
-            correct += (chosen_rewards > rejected_rewards).sum().item()
-            total += chosen_ids.size(0)
-
-    reward_model.train()
-
+@torch.no_grad()
+def evaluate(model, val_loader, device):
+    """Validation loss and pairwise accuracy: fraction where r(chosen) > r(rejected)."""
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+    for batch in val_loader:
+        chosen = model(batch["chosen_ids"].to(device), batch["chosen_mask"].to(device))
+        rejected = model(batch["rejected_ids"].to(device), batch["rejected_mask"].to(device))
+        diff = chosen - rejected
+        total_loss += -F.logsigmoid(diff).sum().item()
+        correct += (diff > 0).sum().item()
+        total += diff.size(0)
+    model.train()
     return total_loss / total, correct / total
 
 
-reward_model.train()
+def save_checkpoint(model, optimizer, step):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    tmp = CKPT_PATH + ".tmp"
+    torch.save({"step": step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict()}, tmp)
+    os.replace(tmp, CKPT_PATH)       # a half-written file never replaces a good one
 
-total_loss = 0.0
-correct = 0
-total = 0
 
-for step, batch in enumerate(train_loader):
+def main():
+    torch.manual_seed(SEED)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Device:", device)
 
-    chosen_ids = batch["chosen_ids"].to(device)
-    chosen_mask = batch["chosen_mask"].to(device)
+    if not os.path.isdir(SFT_PATH):
+        raise FileNotFoundError(f"SFT checkpoint not found: {SFT_PATH}")
 
-    rejected_ids = batch["rejected_ids"].to(device)
-    rejected_mask = batch["rejected_mask"].to(device)
+    model = RewardModel(SFT_PATH).to(device)
+    print("Backbone dtype:", next(model.backbone.parameters()).dtype)      # should be float32
+    print("Reward head dtype:", model.reward_head.weight.dtype)
 
-    chosen_rewards = reward_model(chosen_ids, chosen_mask)
-    rejected_rewards = reward_model(rejected_ids, rejected_mask)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
-    difference = chosen_rewards - rejected_rewards
+    # ---- resume? ----
+    start_step = 0
+    if os.path.exists(CKPT_PATH):
+        state = torch.load(CKPT_PATH, map_location=device)
+        model.load_state_dict(state["model_state_dict"])
+        optimizer.load_state_dict(state["optimizer_state_dict"])
+        start_step = state["step"]
+        print(f"Resuming from step {start_step}")
 
-    loss = loss_func(chosen_rewards, rejected_rewards)
+    tokenizer = load_tokenizer()
+    train_data, val_data = load_preference_splits(tokenizer)
+    print("Training pairs:", len(train_data), "| Validation pairs:", len(val_data))
 
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    # Fixed shuffle (same every run), so a resumed run skips the batches already used
+    order = torch.randperm(len(train_data), generator=torch.Generator().manual_seed(SEED)).tolist()
+    train_data = [train_data[i] for i in order][start_step * BATCH_SIZE:]
 
-    torch.nn.utils.clip_grad_norm_(
-        reward_model.parameters(),
-        max_norm=1.0
-    )
+    collate = partial(collate_pref, pad_id=tokenizer.pad_token_id)
+    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate)
+    val_loader = DataLoader(val_data, batch_size=4, shuffle=False, collate_fn=collate)
 
-    optimizer.step()
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    log_file = open(LOG_PATH, "a" if start_step > 0 else "w")
 
-    total_loss += loss.item()
-    correct += (difference > 0).sum().item()
-    total += chosen_ids.size(0)
+    model.train()
+    run_loss, run_correct, run_total = 0.0, 0, 0
 
-    if step == 0:
-        print("Initial reward differences:", difference.detach().cpu())
-        print("Initial mean difference:", difference.mean().item())
+    for step, batch in enumerate(train_loader, start=start_step + 1):
+        loss_value, n_correct = train_step(model, optimizer, batch, device)
+        run_loss += loss_value
+        run_correct += n_correct
+        run_total += batch["prompt_lens"].size(0)
 
-    if (step + 1) % 50 == 0:
-        print(
-            f"Step {step + 1} | "
-            f"Train Loss: {total_loss / 50:.6f} | "
-            f"Train Acc: {correct / total:.4f}"
-        )
+        if step == 1:
+            # The head is randomly initialised, so rewards are nearly equal: loss ~ 0.69
+            print(f"First-step loss: {loss_value:.4f} (expected about 0.69)")
 
-        total_loss = 0.0
-        correct = 0
-        total = 0
+        if step % PRINT_EVERY == 0:
+            train_loss = run_loss / PRINT_EVERY
+            train_acc = run_correct / run_total
+            run_loss, run_correct, run_total = 0.0, 0, 0
+            print(f"Step {step} | train loss {train_loss:.4f} | train acc {train_acc:.4f}")
+            log_file.write(json.dumps({"step": step, "train_loss": train_loss,
+                                       "train_acc": train_acc}) + "\n")
+            log_file.flush()
 
-    if (step + 1) % 250 == 0:
-        checkpoint = {
-            "step": step + 1,
-            "model_state_dict": reward_model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict()
-        }
+        if step % EVAL_EVERY == 0:
+            val_loss, val_acc = evaluate(model, val_loader, device)
+            print(f"Step {step} | VALIDATION loss {val_loss:.4f} | acc {val_acc * 100:.2f}%")
+            log_file.write(json.dumps({"step": step, "val_loss": val_loss,
+                                       "val_acc": val_acc}) + "\n")
+            log_file.flush()
+            save_checkpoint(model, optimizer, step)
+            print(f"Checkpoint saved at step {step}")
 
-        checkpoint_file = os.path.join(
-            save_path,
-            f"checkpoint_{step + 1}.pt"
-        )
+    # ---- final evaluation + save ----
+    val_loss, val_acc = evaluate(model, val_loader, device)
+    print(f"\nFINAL validation loss {val_loss:.4f} | pairwise accuracy {val_acc * 100:.2f}%")
+    log_file.write(json.dumps({"final": True, "val_loss": val_loss, "val_acc": val_acc}) + "\n")
+    log_file.close()
 
-        torch.save(checkpoint, checkpoint_file)
-        print("Checkpoint saved:", checkpoint_file)
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    torch.save(model.state_dict(), FINAL_PATH)
+    print("Final reward model saved:", FINAL_PATH)
 
-        val_loss, val_acc = evaluate()
 
-        print(
-            f"Validation Loss: {val_loss:.6f} | "
-            f"Validation Accuracy: {val_acc * 100:.2f}%"
-        )
-
-final_path = os.path.join(save_path, "reward_model.pt")
-
-torch.save(reward_model.state_dict(), final_path)
-
-print("\nTraining completed!")
-print("Final reward model saved:", final_path)
-
-print("\nSaved checkpoint files:")
-for filename in sorted(os.listdir(save_path)):
-    print(filename)
+if __name__ == "__main__":
+    main()
