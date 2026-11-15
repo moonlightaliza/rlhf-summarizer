@@ -21,7 +21,7 @@ class PolicyWithValue(nn.Module):
 
     def __init__(self, sft_path, device):
         super().__init__()
-        self.lm = load_causal_lm(sft_path, device)
+        self.lm = load_causal_lm(sft_path, device).float()
         self.value_head = nn.Linear(self.lm.config.hidden_size, 1).to(device)
 
     def forward(self, input_ids, attention_mask):
